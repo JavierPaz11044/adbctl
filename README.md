@@ -192,24 +192,30 @@ adbctl mirror -- --max-size 1024 --stay-awake
 
 ## Estructura del proyecto
 
+Arquitectura modular por *feature*: `main.go` solo llama a `cli.Main()`; toda
+la lógica vive en paquetes bajo `internal/`.
+
 ```
 adbctl/
-├── main.go       # entry point, dispatch y flags de subcomandos CLI
-├── adb.go        # wrapper de ejecución de adb, listado/selección de dispositivos
-├── apps.go       # listar/lanzar/reiniciar/parar/enable-disable/uninstall/clear
-├── appinfo.go    # 'info': parseo de dumpsys package
-├── batch.go      # operaciones en lote (uninstall/clear/stop por selección)
-├── logcat.go     # motor de logcat estilo pidcat (seguimiento de PID + formato)
-├── install.go    # instalar APKs (adb install)
-├── config.go     # ~/.adbctlrc (prefijo de paquetes, último dispositivo)
-├── mirror.go     # integración con scrcpy
-├── menu.go       # menú interactivo con submenús
-├── gui.go        # interfaz gráfica de dos paneles con Fyne (solo con -tags gui)
-├── gui_nogui.go  # stub de la GUI para el build por defecto
-└── go.mod
+├── main.go                  # 5 líneas: os.Exit(cli.Main())
+└── internal/
+    ├── adb/       # ejecución de adb; Device, List, Resolve, Connected
+    ├── config/    # ~/.adbctlrc (Config, Load, Save)
+    ├── ui/        # Prompt, Confirm, helpers de formato (CLI + menú)
+    ├── apps/      # ciclo de vida de apps (apps.go) + 'info' (info.go) + prefijos
+    ├── batch/     # uninstall/clear/stop sobre una selección   → usa apps
+    ├── logcat/    # motor estilo pidcat: engine + format + pidcat  → usa adb
+    ├── install/   # adb install                                 → usa adb
+    ├── mirror/    # scrcpy
+    ├── cli/       # parseo de flags y despacho; un cmd*.go por feature
+    ├── menu/      # menú interactivo con submenús
+    └── gui/       # interfaz gráfica Fyne (gui.go //go:build gui, stub.go si no)
 ```
 
-Al no depender de librerías externas, extenderlo es sencillo: cada archivo
-tiene una responsabilidad clara, así que para agregar un comando nuevo solo
-hace falta una función en el archivo correspondiente (o uno nuevo) y su
-entrada en `main.go` / `menu.go`.
+Dependencias: `adb` y `config` son la base; cada feature depende solo de lo que
+necesita; `cli` / `menu` / `gui` orquestan. Añadir un comando nuevo: función en
+el paquete de la feature + un `cmd*` en `internal/cli` + su `case` en el
+dispatcher (y opcionalmente una entrada en `internal/menu`).
+
+La CLI y el menú siguen usando solo la librería estándar (`flag`); las
+dependencias de `internal/gui` (Fyne) solo entran con `-tags gui`.

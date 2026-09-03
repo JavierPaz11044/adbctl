@@ -1,30 +1,27 @@
-package main
+// Package menu es el menú interactivo (modo sin argumentos), agrupado en
+// submenús Apps / Lote / Dispositivo.
+package menu
 
 import (
-	"bufio"
 	"fmt"
 	"os"
 	"strconv"
 	"strings"
+
+	"adbctl/internal/adb"
+	"adbctl/internal/apps"
+	"adbctl/internal/batch"
+	"adbctl/internal/config"
+	"adbctl/internal/gui"
+	"adbctl/internal/install"
+	"adbctl/internal/logcat"
+	"adbctl/internal/mirror"
+	"adbctl/internal/ui"
 )
 
-var stdinReader = bufio.NewReader(os.Stdin)
-
-func prompt(label string) string {
-	fmt.Print(label)
-	line, _ := stdinReader.ReadString('\n')
-	return strings.TrimSpace(line)
-}
-
-func confirm(label string) bool {
-	answer := strings.ToLower(prompt(label + " [s/N]: "))
-	return answer == "s" || answer == "si" || answer == "sí" || answer == "y" || answer == "yes"
-}
-
-// pickDeviceInteractive resuelve el dispositivo a usar en modo menú, preguntando
-// al usuario si hay más de uno conectado.
-func pickDeviceInteractive() (string, error) {
-	devices, err := listDevices()
+// pickDevice resuelve el dispositivo a usar, preguntando si hay más de uno.
+func pickDevice() (string, error) {
+	devices, err := adb.List()
 	if err != nil {
 		return "", err
 	}
@@ -37,7 +34,7 @@ func pickDeviceInteractive() (string, error) {
 		fmt.Printf("  %d) %s  (%s)  %s\n", i+1, d.Serial, d.State, d.Model)
 	}
 	for {
-		choice := prompt("Elige un dispositivo (número): ")
+		choice := ui.Prompt("Elige un dispositivo (número): ")
 		idx, err := strconv.Atoi(choice)
 		if err == nil && idx >= 1 && idx <= len(devices) {
 			return devices[idx-1].Serial, nil
@@ -46,13 +43,11 @@ func pickDeviceInteractive() (string, error) {
 	}
 }
 
-// selectDeviceAtStartup lista los dispositivos al arrancar el menú interactivo y
-// deja elegir uno de una vez. Si sólo hay uno conectado, lo usa. Si ~/.adbctlrc
-// recuerda un serial que sigue conectado, lo ofrece por defecto (Enter para
-// mantenerlo). Si no hay dispositivos, avisa y devuelve "" (se puede reintentar
-// luego desde la opción 2).
-func selectDeviceAtStartup(cfg Config) string {
-	devices, err := listDevices()
+// selectDeviceAtStartup lista los dispositivos al arrancar y deja elegir uno.
+// Si sólo hay uno, lo usa. Si ~/.adbctlrc recuerda un serial que sigue
+// conectado, lo ofrece por defecto (Enter). Si no hay ninguno, avisa y "".
+func selectDeviceAtStartup(cfg config.Config) string {
+	devices, err := adb.List()
 	if err != nil {
 		fmt.Println("Aviso:", err)
 		return ""
@@ -78,7 +73,7 @@ func selectDeviceAtStartup(cfg Config) string {
 		if defaultIdx >= 0 {
 			label = fmt.Sprintf("Elige un dispositivo (número) [Enter = %d]: ", defaultIdx+1)
 		}
-		choice := prompt(label)
+		choice := ui.Prompt(label)
 		if choice == "" && defaultIdx >= 0 {
 			return devices[defaultIdx].Serial
 		}
@@ -91,14 +86,14 @@ func selectDeviceAtStartup(cfg Config) string {
 }
 
 // promptFilter pide un filtro de paquete respetando el prefijo configurado:
-// Enter usa el prefijo (si hay uno), '*' fuerza a ver todos los paquetes, y
-// cualquier otro texto se usa como substring.
+// Enter usa el prefijo (si hay), '*' fuerza a ver todos, y cualquier otro texto
+// se usa como substring.
 func promptFilter(prefix string) string {
 	label := "Filtro de nombre de paquete (Enter para ver todos): "
 	if prefix != "" {
 		label = fmt.Sprintf("Filtro (Enter = %q · '*' = todos): ", prefix)
 	}
-	f := prompt(label)
+	f := ui.Prompt(label)
 	switch {
 	case f == "" && prefix != "":
 		return prefix
@@ -109,11 +104,11 @@ func promptFilter(prefix string) string {
 	}
 }
 
-// pickPackageInteractive lista paquetes y deja elegir uno. Con prefijo
-// configurado, se usa como filtro por defecto y los nombres se muestran en corto.
-func pickPackageInteractive(serial, prefix string) (string, error) {
+// pickPackage lista paquetes y deja elegir uno. Con prefijo configurado, se usa
+// como filtro por defecto y los nombres se muestran en corto.
+func pickPackage(serial, prefix string) (string, error) {
 	filter := promptFilter(prefix)
-	pkgs, err := listPackages(serial, false, filter)
+	pkgs, err := apps.List(serial, false, filter)
 	if err != nil {
 		return "", err
 	}
@@ -121,14 +116,14 @@ func pickPackageInteractive(serial, prefix string) (string, error) {
 		return "", fmt.Errorf("no se encontraron paquetes que coincidan con %q", filter)
 	}
 	for i, p := range pkgs {
-		if s := shortName(p.Name, prefix); s != p.Name {
+		if s := apps.ShortName(p.Name, prefix); s != p.Name {
 			fmt.Printf("  %d) %s  (%s)\n", i+1, s, p.Name)
 		} else {
 			fmt.Printf("  %d) %s\n", i+1, p.Name)
 		}
 	}
 	for {
-		choice := prompt("Elige un paquete (número): ")
+		choice := ui.Prompt("Elige un paquete (número): ")
 		idx, err := strconv.Atoi(choice)
 		if err == nil && idx >= 1 && idx <= len(pkgs) {
 			return pkgs[idx-1].Name, nil
@@ -137,19 +132,18 @@ func pickPackageInteractive(serial, prefix string) (string, error) {
 	}
 }
 
-// configurePrefixInteractive fija o borra el prefijo de paquetes guardado en
-// ~/.adbctlrc. Con un dispositivo seleccionado, ofrece sugerencias a partir de
-// las apps de terceros instaladas.
-func configurePrefixInteractive(cfg *Config, serial string) {
+// configurePrefix fija o borra el prefijo guardado en ~/.adbctlrc, con
+// sugerencias a partir de las apps de terceros instaladas.
+func configurePrefix(cfg *config.Config, serial string) {
 	if cfg.PackagePrefix != "" {
 		fmt.Printf("Prefijo actual: %s\n", cfg.PackagePrefix)
 	} else {
 		fmt.Println("No hay prefijo configurado.")
 	}
 
-	var sugs []PrefixSuggestion
+	var sugs []apps.PrefixSuggestion
 	if serial != "" {
-		if s, err := suggestPrefixes(serial); err == nil && len(s) > 0 {
+		if s, err := apps.SuggestPrefixes(serial); err == nil && len(s) > 0 {
 			sugs = s
 			fmt.Println("Sugerencias (por apps de terceros instaladas):")
 			for i, ps := range sugs {
@@ -159,14 +153,14 @@ func configurePrefixInteractive(cfg *Config, serial string) {
 		}
 	}
 
-	in := prompt("Prefijo: ")
+	in := ui.Prompt("Prefijo: ")
 	if idx, err := strconv.Atoi(in); err == nil && idx >= 1 && idx <= len(sugs) {
 		cfg.PackagePrefix = sugs[idx-1].Prefix
 	} else {
 		cfg.PackagePrefix = strings.TrimSuffix(strings.TrimSpace(in), ".")
 	}
 
-	if err := cfg.save(); err != nil {
+	if err := cfg.Save(); err != nil {
 		fmt.Println("Error guardando ~/.adbctlrc:", err)
 		return
 	}
@@ -177,19 +171,18 @@ func configurePrefixInteractive(cfg *Config, serial string) {
 	}
 }
 
-// runInteractiveMenu es el bucle principal del modo sin argumentos. El menú
-// está agrupado en submenús (Apps / Lote / Dispositivo) para no saturar.
-func runInteractiveMenu() {
-	if err := checkADBInstalled(); err != nil {
+// Run es el bucle principal del modo sin argumentos.
+func Run() {
+	if err := adb.CheckInstalled(); err != nil {
 		fmt.Fprintln(os.Stderr, "Error:", err)
 		os.Exit(1)
 	}
 
-	cfg := loadConfig()
+	cfg := config.Load()
 	serial := selectDeviceAtStartup(cfg)
 	if serial != "" && serial != cfg.Device {
 		cfg.Device = serial
-		_ = cfg.save()
+		_ = cfg.Save()
 	}
 
 	for {
@@ -210,7 +203,7 @@ func runInteractiveMenu() {
 		fmt.Println("4) Interfaz gráfica (GUI)")
 		fmt.Println("0) Salir")
 
-		switch prompt("> ") {
+		switch ui.Prompt("> ") {
 		case "1":
 			s, err := ensureSerial(&serial, &cfg)
 			if err != nil {
@@ -228,11 +221,11 @@ func runInteractiveMenu() {
 		case "3":
 			deviceSubmenu(&serial, &cfg)
 		case "4":
-			if err := runGUI(); err != nil {
+			if err := gui.Run(); err != nil {
 				fmt.Println("Error:", err)
 				continue
 			}
-			cfg = loadConfig() // la GUI pudo cambiar prefijo/dispositivo
+			cfg = config.Load() // la GUI pudo cambiar prefijo/dispositivo
 		case "0", "q", "Q":
 			fmt.Println("Hasta luego.")
 			return
@@ -247,7 +240,7 @@ func ensurePkg(pkg *string, serial, prefix string) (string, error) {
 	if *pkg != "" {
 		return *pkg, nil
 	}
-	p, err := pickPackageInteractive(serial, prefix)
+	p, err := pickPackage(serial, prefix)
 	if err != nil {
 		return "", err
 	}
@@ -257,7 +250,7 @@ func ensurePkg(pkg *string, serial, prefix string) (string, error) {
 
 // appsSubmenu agrupa todas las acciones sobre una app. Recuerda la app elegida
 // mientras no se vuelva atrás.
-func appsSubmenu(serial string, cfg *Config) {
+func appsSubmenu(serial string, cfg *config.Config) {
 	var pkg string
 	for {
 		fmt.Println()
@@ -278,19 +271,19 @@ func appsSubmenu(serial string, cfg *Config) {
 		fmt.Println("10) Ver log (logcat) de la app")
 		fmt.Println(" 0) Volver")
 
-		choice := prompt("> ")
+		choice := ui.Prompt("> ")
 		if choice == "0" {
 			return
 		}
 
 		if choice == "2" {
-			pkgs, err := listPackages(serial, false, promptFilter(cfg.PackagePrefix))
+			pkgs, err := apps.List(serial, false, promptFilter(cfg.PackagePrefix))
 			if err != nil {
 				fmt.Println("Error:", err)
 				continue
 			}
 			for _, p := range pkgs {
-				if sn := shortName(p.Name, cfg.PackagePrefix); sn != p.Name {
+				if sn := apps.ShortName(p.Name, cfg.PackagePrefix); sn != p.Name {
 					fmt.Printf("  - %s  (%s)\n", sn, p.Name)
 				} else {
 					fmt.Println("  -", p.Name)
@@ -299,7 +292,7 @@ func appsSubmenu(serial string, cfg *Config) {
 			continue
 		}
 		if choice == "1" {
-			p, err := pickPackageInteractive(serial, cfg.PackagePrefix)
+			p, err := pickPackage(serial, cfg.PackagePrefix)
 			if err != nil {
 				fmt.Println("Error:", err)
 				continue
@@ -316,42 +309,42 @@ func appsSubmenu(serial string, cfg *Config) {
 
 		switch choice {
 		case "3":
-			info, err := getAppInfo(serial, p)
+			info, err := apps.GetInfo(serial, p)
 			if err != nil {
 				fmt.Println("Error:", err)
 				continue
 			}
 			fmt.Print(info.String())
 		case "4":
-			menuRun("App lanzada", p, launchApp(serial, p))
+			menuRun("App lanzada", p, apps.Launch(serial, p))
 		case "5":
-			menuRun("Reiniciada", p, restartApp(serial, p))
+			menuRun("Reiniciada", p, apps.Restart(serial, p))
 		case "6":
-			menuRun("Detenida", p, forceStop(serial, p))
+			menuRun("Detenida", p, apps.ForceStop(serial, p))
 		case "7":
-			info, err := getAppInfo(serial, p)
+			info, err := apps.GetInfo(serial, p)
 			if err != nil {
 				fmt.Println("Error:", err)
 				continue
 			}
 			target := !info.Enabled
-			menuRun(pick(target, "Habilitada", "Deshabilitada"), p, setEnabled(serial, p, target))
+			menuRun(ui.Pick(target, "Habilitada", "Deshabilitada"), p, apps.SetEnabled(serial, p, target))
 		case "8":
-			if !confirm(fmt.Sprintf("¿Desinstalar %s de %s?", p, serial)) {
+			if !ui.Confirm(fmt.Sprintf("¿Desinstalar %s de %s?", p, serial)) {
 				fmt.Println("Cancelado.")
 				continue
 			}
-			if menuRun("Desinstalada", p, uninstallApp(serial, p)) {
+			if menuRun("Desinstalada", p, apps.Uninstall(serial, p)) {
 				pkg = ""
 			}
 		case "9":
-			if !confirm(fmt.Sprintf("¿Borrar datos y caché de %s? Esto es irreversible", p)) {
+			if !ui.Confirm(fmt.Sprintf("¿Borrar datos y caché de %s? Esto es irreversible", p)) {
 				fmt.Println("Cancelado.")
 				continue
 			}
-			menuRun("Datos y caché limpiados", p, clearAppData(serial, p))
+			menuRun("Datos y caché limpiados", p, apps.Clear(serial, p))
 		case "10":
-			streamLogcatMenu(serial, p)
+			streamLogcat(serial, p)
 		default:
 			fmt.Println("Opción inválida.")
 		}
@@ -368,18 +361,16 @@ func menuRun(okMsg, pkg string, err error) bool {
 	return true
 }
 
-// streamLogcatMenu sigue el logcat de la app hasta que el usuario pulse Enter.
-// El motor sigue al proceso por am_proc_start/died, así que no hace falta que la
-// app esté ya corriendo.
-func streamLogcatMenu(serial, pkg string) {
-	ls, err := startLogStream(serial, pkg, LogOpts{Color: true})
+// streamLogcat sigue el logcat de la app hasta que el usuario pulse Enter.
+func streamLogcat(serial, pkg string) {
+	ls, err := logcat.Start(serial, pkg, logcat.Opts{Color: true})
 	if err != nil {
 		fmt.Println("Error:", err)
 		return
 	}
 	fmt.Println("(siguiendo el log; pulsa Enter para detener)")
 	go func() {
-		_, _ = stdinReader.ReadString('\n')
+		_, _ = ui.Stdin.ReadString('\n')
 		ls.Stop()
 	}()
 	n := 0
@@ -397,7 +388,7 @@ func streamLogcatMenu(serial, pkg string) {
 }
 
 // batchSubmenu ejecuta operaciones sobre varios paquetes elegidos por filtro.
-func batchSubmenu(serial string, cfg *Config) {
+func batchSubmenu(serial string, cfg *config.Config) {
 	for {
 		fmt.Println()
 		fmt.Println("-- Lote --")
@@ -405,13 +396,13 @@ func batchSubmenu(serial string, cfg *Config) {
 		fmt.Println("2) Limpiar datos por filtro/prefijo")
 		fmt.Println("3) Forzar detención por filtro/prefijo")
 		fmt.Println("0) Volver")
-		switch prompt("> ") {
+		switch ui.Prompt("> ") {
 		case "1":
-			runBatchMenu(serial, cfg.PackagePrefix, BatchUninstall)
+			runBatch(serial, cfg.PackagePrefix, batch.Uninstall)
 		case "2":
-			runBatchMenu(serial, cfg.PackagePrefix, BatchClear)
+			runBatch(serial, cfg.PackagePrefix, batch.Clear)
 		case "3":
-			runBatchMenu(serial, cfg.PackagePrefix, BatchStop)
+			runBatch(serial, cfg.PackagePrefix, batch.Stop)
 		case "0":
 			return
 		default:
@@ -420,14 +411,14 @@ func batchSubmenu(serial string, cfg *Config) {
 	}
 }
 
-// runBatchMenu pide el filtro, muestra la lista, y ofrece ejecutar o simular.
-func runBatchMenu(serial, prefix string, kind BatchKind) {
+// runBatch pide el filtro, muestra la lista, y ofrece ejecutar o simular.
+func runBatch(serial, prefix string, kind batch.Kind) {
 	match := promptFilter(prefix)
 	if strings.TrimSpace(match) == "" {
 		fmt.Println("Necesitas un filtro (o un prefijo configurado). No se opera sobre todo.")
 		return
 	}
-	pkgs, err := selectBatchPackages(serial, match, false)
+	pkgs, err := batch.SelectPackages(serial, match, false)
 	if err != nil {
 		fmt.Println("Error:", err)
 		return
@@ -436,16 +427,16 @@ func runBatchMenu(serial, prefix string, kind BatchKind) {
 		fmt.Printf("Ningún paquete coincide con %q.\n", match)
 		return
 	}
-	fmt.Printf("%s %d paquete(s):\n", kind.verb(), len(pkgs))
+	fmt.Printf("%s %d paquete(s):\n", kind.Verb(), len(pkgs))
 	for _, p := range pkgs {
 		fmt.Println("  -", p)
 	}
-	switch strings.ToLower(prompt("Ejecutar? [s = sí · n = solo simular · otra = cancelar]: ")) {
+	switch strings.ToLower(ui.Prompt("Ejecutar? [s = sí · n = solo simular · otra = cancelar]: ")) {
 	case "n":
 		fmt.Println("(simulación: no se hizo nada)")
 		return
 	case "s", "si", "sí", "y", "yes":
-		okN, failN, summary := summarizeBatch(runBatch(serial, kind, pkgs))
+		okN, failN, summary := batch.Summarize(batch.Run(serial, kind, pkgs))
 		fmt.Print(summary)
 		fmt.Printf("Hecho: %d ok, %d con error.\n", okN, failN)
 	default:
@@ -454,7 +445,7 @@ func runBatchMenu(serial, prefix string, kind BatchKind) {
 }
 
 // deviceSubmenu agrupa lo relativo al dispositivo y a la configuración.
-func deviceSubmenu(serial *string, cfg *Config) {
+func deviceSubmenu(serial *string, cfg *config.Config) {
 	for {
 		fmt.Println()
 		fmt.Println("-- Dispositivo --")
@@ -465,9 +456,9 @@ func deviceSubmenu(serial *string, cfg *Config) {
 		fmt.Println("5) Configurar prefijo de paquetes")
 		fmt.Println("0) Volver")
 
-		switch prompt("> ") {
+		switch ui.Prompt("> ") {
 		case "1":
-			devices, err := listDevices()
+			devices, err := adb.List()
 			if err != nil {
 				fmt.Println("Error:", err)
 				continue
@@ -476,7 +467,7 @@ func deviceSubmenu(serial *string, cfg *Config) {
 				fmt.Printf("  - %s (%s) %s\n", d.Serial, d.State, d.Model)
 			}
 		case "2":
-			s, err := pickDeviceInteractive()
+			s, err := pickDevice()
 			if err != nil {
 				fmt.Println("Error:", err)
 				continue
@@ -484,7 +475,7 @@ func deviceSubmenu(serial *string, cfg *Config) {
 			*serial = s
 			if cfg.Device != s {
 				cfg.Device = s
-				_ = cfg.save()
+				_ = cfg.Save()
 			}
 			fmt.Println("Dispositivo seleccionado:", s)
 		case "3":
@@ -493,12 +484,12 @@ func deviceSubmenu(serial *string, cfg *Config) {
 				fmt.Println("Error:", err)
 				continue
 			}
-			path := prompt("Ruta del .apk: ")
+			path := ui.Prompt("Ruta del .apk: ")
 			if path == "" {
 				continue
 			}
 			fmt.Println("Instalando…")
-			out, err := installAPK(s, path, InstallOpts{Reinstall: true})
+			out, err := install.APK(s, path, install.Opts{Reinstall: true})
 			if err != nil {
 				fmt.Println("Error:", err)
 				continue
@@ -510,16 +501,16 @@ func deviceSubmenu(serial *string, cfg *Config) {
 				fmt.Println("Error:", err)
 				continue
 			}
-			extra := prompt("Flags extra para scrcpy (Enter para ninguno): ")
+			extra := ui.Prompt("Flags extra para scrcpy (Enter para ninguno): ")
 			var extraArgs []string
 			if extra != "" {
 				extraArgs = strings.Fields(extra)
 			}
-			if err := mirrorScreen(s, extraArgs); err != nil {
+			if err := mirror.Screen(s, extraArgs); err != nil {
 				fmt.Println("Error:", err)
 			}
 		case "5":
-			configurePrefixInteractive(cfg, *serial)
+			configurePrefix(cfg, *serial)
 		case "0":
 			return
 		default:
@@ -528,21 +519,20 @@ func deviceSubmenu(serial *string, cfg *Config) {
 	}
 }
 
-// ensureSerial garantiza que haya un dispositivo seleccionado, resolviéndolo
-// automáticamente si solo hay uno conectado, o pidiéndolo si hay varios.
-// Persiste el serial elegido en ~/.adbctlrc.
-func ensureSerial(serial *string, cfg *Config) (string, error) {
+// ensureSerial garantiza que haya un dispositivo seleccionado (auto si sólo hay
+// uno, o preguntando). Persiste el serial elegido en ~/.adbctlrc.
+func ensureSerial(serial *string, cfg *config.Config) (string, error) {
 	if *serial != "" {
 		return *serial, nil
 	}
-	s, err := pickDeviceInteractive()
+	s, err := pickDevice()
 	if err != nil {
 		return "", err
 	}
 	*serial = s
 	if cfg.Device != s {
 		cfg.Device = s
-		_ = cfg.save()
+		_ = cfg.Save()
 	}
 	return s, nil
 }

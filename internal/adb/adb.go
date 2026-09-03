@@ -1,4 +1,6 @@
-package main
+// Package adb envuelve la ejecución del binario `adb` y el listado/selección de
+// dispositivos. Es la base sobre la que se apoyan el resto de features.
+package adb
 
 import (
 	"bufio"
@@ -19,17 +21,18 @@ type Device struct {
 	Model  string
 }
 
-// checkADBInstalled verifica que el binario adb esté disponible en el PATH.
-func checkADBInstalled() error {
+// CheckInstalled verifica que el binario adb esté disponible en el PATH.
+func CheckInstalled() error {
 	if _, err := exec.LookPath("adb"); err != nil {
 		return fmt.Errorf("no se encontró 'adb' en el PATH. Instala Android Platform Tools y asegúrate de que esté en tu PATH")
 	}
 	return nil
 }
 
-// runADB ejecuta un comando adb (opcionalmente contra un serial específico) y devuelve stdout.
-// Si stderr tiene contenido y el comando falla, el error incluye ese detalle.
-func runADB(serial string, args ...string) (string, error) {
+// Run ejecuta un comando adb (opcionalmente contra un serial específico) y
+// devuelve stdout. Si stderr tiene contenido y el comando falla, el error
+// incluye ese detalle.
+func Run(serial string, args ...string) (string, error) {
 	fullArgs := []string{}
 	if serial != "" {
 		fullArgs = append(fullArgs, "-s", serial)
@@ -42,8 +45,7 @@ func runADB(serial string, args ...string) (string, error) {
 	cmd.Stdout = &out
 	cmd.Stderr = &errOut
 
-	err := cmd.Run()
-	if err != nil {
+	if err := cmd.Run(); err != nil {
 		msg := strings.TrimSpace(errOut.String())
 		if msg == "" {
 			msg = err.Error()
@@ -53,10 +55,9 @@ func runADB(serial string, args ...string) (string, error) {
 	return out.String(), nil
 }
 
-// runADBInteractive ejecuta adb conectando stdin/stdout/stderr directamente al terminal.
-// Útil para comandos como 'adb shell' interactivo, aunque aquí lo usamos poco;
-// se deja disponible para extensiones futuras.
-func runADBInteractive(serial string, args ...string) error {
+// RunInteractive ejecuta adb conectando stdin/stdout/stderr directamente al
+// terminal (para comandos interactivos como 'adb shell').
+func RunInteractive(serial string, args ...string) error {
 	fullArgs := []string{}
 	if serial != "" {
 		fullArgs = append(fullArgs, "-s", serial)
@@ -70,9 +71,9 @@ func runADBInteractive(serial string, args ...string) error {
 	return cmd.Run()
 }
 
-// listDevices devuelve todos los dispositivos reportados por 'adb devices -l'.
-func listDevices() ([]Device, error) {
-	out, err := runADB("", "devices", "-l")
+// List devuelve todos los dispositivos reportados por 'adb devices -l'.
+func List() ([]Device, error) {
+	out, err := Run("", "devices", "-l")
 	if err != nil {
 		return nil, err
 	}
@@ -103,17 +104,16 @@ func listDevices() ([]Device, error) {
 	return devices, nil
 }
 
-// resolveDevice decide qué serial usar dado lo que el usuario pidió explícitamente (puede ser "").
-// Reglas:
-//   - Si se pasó un serial explícito, se usa tal cual (adb fallará después si no existe).
-//   - Si solo hay un dispositivo conectado, se usa automáticamente.
-//   - Si hay varios y no se especificó, se devuelve error pidiendo -s (modo CLI)
-//     o se debe resolver antes con pickDeviceInteractive (modo menú).
-func resolveDevice(explicitSerial string) (string, error) {
+// Resolve decide qué serial usar dado lo que el usuario pidió explícitamente
+// (puede ser ""):
+//   - serial explícito -> se usa tal cual (adb fallará después si no existe);
+//   - un solo dispositivo conectado -> se usa automáticamente;
+//   - varios y ninguno indicado -> error pidiendo -s <serial>.
+func Resolve(explicitSerial string) (string, error) {
 	if explicitSerial != "" {
 		return explicitSerial, nil
 	}
-	devices, err := listDevices()
+	devices, err := List()
 	if err != nil {
 		return "", err
 	}
@@ -126,4 +126,23 @@ func resolveDevice(explicitSerial string) (string, error) {
 		fmt.Fprintf(&b, "  - %s (%s) %s\n", d.Serial, d.State, d.Model)
 	}
 	return "", errors.New(b.String())
+}
+
+// Connected indica si el serial aparece ahora mismo en `adb devices`. Sirve para
+// dar un error claro cuando un dispositivo inalámbrico cambia de IP o se duerme
+// y el serial guardado deja de existir.
+func Connected(serial string) bool {
+	if serial == "" {
+		return false
+	}
+	devs, err := List()
+	if err != nil {
+		return false
+	}
+	for _, d := range devs {
+		if d.Serial == serial {
+			return true
+		}
+	}
+	return false
 }

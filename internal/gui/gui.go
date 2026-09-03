@@ -1,13 +1,8 @@
 //go:build gui
 
-// gui.go implementa la interfaz gráfica (subcomando `adbctl gui`). Solo se
-// compila con la etiqueta de build `gui`:
-//
-//	go build -tags gui -o adbctl .
-//
-// Se mantiene aparte para que el binario por defecto siga sin dependencias
-// externas ni cgo.
-package main
+// Package gui es la interfaz gráfica (Fyne). Solo se compila con la etiqueta de
+// build `gui`; el build por defecto usa el stub de stub.go.
+package gui
 
 import (
 	"fmt"
@@ -25,17 +20,26 @@ import (
 	"fyne.io/fyne/v2/storage"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
+
+	"adbctl/internal/adb"
+	"adbctl/internal/apps"
+	"adbctl/internal/batch"
+	"adbctl/internal/config"
+	"adbctl/internal/install"
+	"adbctl/internal/logcat"
+	"adbctl/internal/mirror"
+	"adbctl/internal/ui"
 )
 
-const guiLogCap = 5000 // líneas máximas retenidas en el panel de log
+const logCap = 5000 // líneas máximas retenidas en el panel de log
 
-// guiState agrupa los widgets y el estado mutable de la ventana.
+// state agrupa los widgets y el estado mutable de la ventana.
 //
 // Panel izquierdo: elegir dispositivo -> buscar/elegir app -> acciones.
 // Panel derecho: logcat en vivo de la app seleccionada, con filtro de texto.
-type guiState struct {
+type state struct {
 	win fyne.Window
-	cfg Config
+	cfg config.Config
 
 	serial  string
 	allPkgs []string
@@ -60,12 +64,12 @@ type guiState struct {
 	logStop   *widget.Button
 	logAllChk *widget.Check
 	logRawChk *widget.Check
-	streamer  *LogStreamer
+	streamer  *logcat.Streamer
 }
 
-// runGUI abre la ventana principal y bloquea hasta que se cierra.
-func runGUI() error {
-	if err := checkADBInstalled(); err != nil {
+// Run abre la ventana principal y bloquea hasta que se cierra.
+func Run() error {
+	if err := adb.CheckInstalled(); err != nil {
 		return err
 	}
 
@@ -73,7 +77,7 @@ func runGUI() error {
 	w := a.NewWindow("adbctl")
 	w.Resize(fyne.NewSize(920, 540))
 
-	g := &guiState{win: w, cfg: loadConfig()}
+	g := &state{win: w, cfg: config.Load()}
 
 	w.SetContent(container.NewHSplit(g.buildLeft(), g.buildRight()))
 	if sp, ok := w.Content().(*container.Split); ok {
@@ -92,12 +96,12 @@ func runGUI() error {
 // Construcción de la interfaz
 // ---------------------------------------------------------------------------
 
-func (g *guiState) buildLeft() fyne.CanvasObject {
+func (g *state) buildLeft() fyne.CanvasObject {
 	g.deviceSel = widget.NewSelect(nil, func(label string) {
 		g.serial = g.devSerials[label]
 		if g.serial != "" && g.cfg.Device != g.serial {
 			g.cfg.Device = g.serial
-			_ = g.cfg.save()
+			_ = g.cfg.Save()
 		}
 		if g.serial != "" {
 			g.mirrorBtn.Enable()
@@ -164,7 +168,7 @@ func (g *guiState) buildLeft() fyne.CanvasObject {
 	)
 }
 
-func (g *guiState) buildRight() fyne.CanvasObject {
+func (g *state) buildRight() fyne.CanvasObject {
 	g.logFilter = widget.NewEntry()
 	g.logFilter.SetPlaceHolder("filtrar log…")
 	g.logFilter.OnChanged = func(string) { g.rebuildLogView() }
@@ -200,9 +204,9 @@ func (g *guiState) buildRight() fyne.CanvasObject {
 // Estado / listas
 // ---------------------------------------------------------------------------
 
-func (g *guiState) setStatus(s string) { g.status.SetText(s) }
+func (g *state) setStatus(s string) { g.status.SetText(s) }
 
-func (g *guiState) updateActionState() {
+func (g *state) updateActionState() {
 	on := g.pkg != ""
 	for _, b := range g.appButtons {
 		if on {
@@ -213,7 +217,7 @@ func (g *guiState) updateActionState() {
 	}
 }
 
-func (g *guiState) applyFilter() {
+func (g *state) applyFilter() {
 	q := strings.ToLower(strings.TrimSpace(g.filterEntry.Text))
 	opts := make([]string, 0, len(g.allPkgs))
 	for _, p := range g.allPkgs {
@@ -239,10 +243,10 @@ func (g *guiState) applyFilter() {
 	}
 }
 
-func (g *guiState) reloadDevices() {
+func (g *state) reloadDevices() {
 	g.setStatus("Buscando dispositivos…")
 	go func() {
-		devices, err := listDevices()
+		devices, err := adb.List()
 		fyne.Do(func() {
 			if err != nil {
 				g.deviceSel.Options = nil
@@ -282,7 +286,7 @@ func (g *guiState) reloadDevices() {
 	}()
 }
 
-func (g *guiState) reloadApps() {
+func (g *state) reloadApps() {
 	serial := g.serial
 	g.pkg = ""
 	g.appSel.ClearSelected()
@@ -294,7 +298,7 @@ func (g *guiState) reloadApps() {
 	}
 	g.setStatus("Cargando apps…")
 	go func() {
-		pkgs, err := listPackages(serial, false, "")
+		pkgs, err := apps.List(serial, false, "")
 		fyne.Do(func() {
 			if err != nil {
 				dialog.ShowError(err, g.win)
@@ -324,20 +328,20 @@ var actionLabels = map[string][2]string{
 	"clear":     {"Limpiando", "Datos y caché limpiados"},
 }
 
-func (g *guiState) act(kind string) {
+func (g *state) act(kind string) {
 	if g.serial == "" {
 		dialog.ShowInformation("Sin dispositivo", "Selecciona un dispositivo primero.", g.win)
 		return
 	}
 
 	if kind == "mirror" {
-		if err := checkScrcpyInstalled(); err != nil {
+		if err := mirror.CheckInstalled(); err != nil {
 			dialog.ShowError(err, g.win)
 			return
 		}
 		g.setStatus("Abriendo scrcpy…")
 		go func() {
-			err := mirrorScreen(g.serial, nil)
+			err := mirror.Screen(g.serial, nil)
 			fyne.Do(func() {
 				if err != nil {
 					dialog.ShowError(err, g.win)
@@ -372,15 +376,15 @@ func (g *guiState) act(kind string) {
 			var err error
 			switch kind {
 			case "launch":
-				err = launchApp(g.serial, pkg)
+				err = apps.Launch(g.serial, pkg)
 			case "restart":
-				err = restartApp(g.serial, pkg)
+				err = apps.Restart(g.serial, pkg)
 			case "stop":
-				err = forceStop(g.serial, pkg)
+				err = apps.ForceStop(g.serial, pkg)
 			case "uninstall":
-				err = uninstallApp(g.serial, pkg)
+				err = apps.Uninstall(g.serial, pkg)
 			case "clear":
-				err = clearAppData(g.serial, pkg)
+				err = apps.Clear(g.serial, pkg)
 			}
 			fyne.Do(func() {
 				if err != nil {
@@ -418,10 +422,10 @@ func (g *guiState) act(kind string) {
 	}
 }
 
-func (g *guiState) showInfo(pkg string) {
+func (g *state) showInfo(pkg string) {
 	g.setStatus("Consultando " + pkg + "…")
 	go func() {
-		info, err := getAppInfo(g.serial, pkg)
+		info, err := apps.GetInfo(g.serial, pkg)
 		fyne.Do(func() {
 			if err != nil {
 				dialog.ShowError(err, g.win)
@@ -438,23 +442,23 @@ func (g *guiState) showInfo(pkg string) {
 	}()
 }
 
-func (g *guiState) toggleEnabled(pkg string) {
+func (g *state) toggleEnabled(pkg string) {
 	g.setStatus("Consultando estado de " + pkg + "…")
 	go func() {
-		info, err := getAppInfo(g.serial, pkg)
+		info, err := apps.GetInfo(g.serial, pkg)
 		if err != nil {
 			fyne.Do(func() { dialog.ShowError(err, g.win); g.setStatus("Error") })
 			return
 		}
 		target := !info.Enabled
-		err = setEnabled(g.serial, pkg, target)
+		err = apps.SetEnabled(g.serial, pkg, target)
 		fyne.Do(func() {
 			if err != nil {
 				dialog.ShowError(err, g.win)
 				g.setStatus("Error")
 				return
 			}
-			g.setStatus(pick(target, "Habilitada", "Deshabilitada") + ": " + pkg)
+			g.setStatus(ui.Pick(target, "Habilitada", "Deshabilitada") + ": " + pkg)
 		})
 	}()
 }
@@ -463,7 +467,7 @@ func (g *guiState) toggleEnabled(pkg string) {
 // Instalar APK (botón + arrastrar y soltar)
 // ---------------------------------------------------------------------------
 
-func (g *guiState) pickAndInstall() {
+func (g *state) pickAndInstall() {
 	if g.serial == "" {
 		dialog.ShowInformation("Instalar APK", "Elige un dispositivo primero.", g.win)
 		return
@@ -480,7 +484,7 @@ func (g *guiState) pickAndInstall() {
 	fd.Show()
 }
 
-func (g *guiState) onDrop(_ fyne.Position, uris []fyne.URI) {
+func (g *state) onDrop(_ fyne.Position, uris []fyne.URI) {
 	if g.serial == "" {
 		dialog.ShowInformation("Instalar APK", "Elige un dispositivo primero.", g.win)
 		return
@@ -494,7 +498,7 @@ func (g *guiState) onDrop(_ fyne.Position, uris []fyne.URI) {
 	dialog.ShowInformation("Instalar APK", "Suelta un archivo .apk.", g.win)
 }
 
-func (g *guiState) confirmInstall(path string) {
+func (g *state) confirmInstall(path string) {
 	base := filepath.Base(path)
 	dialog.ShowConfirm("Instalar APK",
 		fmt.Sprintf("¿Instalar %s en %s?\n(se reinstala conservando datos si ya existe)", base, g.serial),
@@ -504,7 +508,7 @@ func (g *guiState) confirmInstall(path string) {
 			}
 			g.setStatus("Instalando " + base + "…")
 			go func() {
-				out, err := installAPK(g.serial, path, InstallOpts{Reinstall: true})
+				out, err := install.APK(g.serial, path, install.Opts{Reinstall: true})
 				fyne.Do(func() {
 					if err != nil {
 						dialog.ShowError(err, g.win)
@@ -522,7 +526,7 @@ func (g *guiState) confirmInstall(path string) {
 // Lote (checklist)
 // ---------------------------------------------------------------------------
 
-func (g *guiState) batchDialog() {
+func (g *state) batchDialog() {
 	if g.serial == "" {
 		dialog.ShowInformation("Lote", "Elige un dispositivo primero.", g.win)
 		return
@@ -553,7 +557,7 @@ func (g *guiState) batchDialog() {
 	action.SetSelectedIndex(0)
 
 	content := container.NewBorder(
-		container.NewVBox(widget.NewLabel("Filtro: "+dash(q)), action, widget.NewSeparator()),
+		container.NewVBox(widget.NewLabel("Filtro: "+ui.Dash(q)), action, widget.NewSeparator()),
 		nil, nil, nil, sc,
 	)
 	dialog.ShowCustomConfirm("Lote", "Ejecutar", "Cancelar", content, func(ok bool) {
@@ -569,16 +573,16 @@ func (g *guiState) batchDialog() {
 		if len(sel) == 0 {
 			return
 		}
-		kind := BatchUninstall
+		kind := batch.Uninstall
 		switch action.Selected {
 		case "Limpiar datos":
-			kind = BatchClear
+			kind = batch.Clear
 		case "Forzar detención":
-			kind = BatchStop
+			kind = batch.Stop
 		}
-		g.setStatus(fmt.Sprintf("%s %d paquete(s)…", kind.verb(), len(sel)))
+		g.setStatus(fmt.Sprintf("%s %d paquete(s)…", kind.Verb(), len(sel)))
 		go func() {
-			okN, failN, summary := summarizeBatch(runBatch(g.serial, kind, sel))
+			okN, failN, summary := batch.Summarize(batch.Run(g.serial, kind, sel))
 			fyne.Do(func() {
 				g.setStatus(fmt.Sprintf("Lote: %d ok, %d con error", okN, failN))
 				if failN > 0 {
@@ -586,7 +590,7 @@ func (g *guiState) batchDialog() {
 					lbl.TextStyle = fyne.TextStyle{Monospace: true}
 					dialog.ShowCustom("Lote — resultado", "Cerrar", container.NewVScroll(lbl), g.win)
 				}
-				if kind == BatchUninstall {
+				if kind == batch.Uninstall {
 					g.reloadApps()
 				}
 			})
@@ -598,7 +602,7 @@ func (g *guiState) batchDialog() {
 // Panel de log
 // ---------------------------------------------------------------------------
 
-func (g *guiState) startLog() {
+func (g *state) startLog() {
 	if g.streamer != nil {
 		return
 	}
@@ -607,13 +611,13 @@ func (g *guiState) startLog() {
 		dialog.ShowInformation("Log", "Elige una app o marca «sin filtro».", g.win)
 		return
 	}
-	// startLogStream hace llamadas a adb y puede tardar ~1s; fuera del hilo UI.
+	// logcat.Start hace llamadas a adb y puede tardar ~1s; fuera del hilo UI.
 	g.logStart.Disable()
 	g.setStatus("Conectando al log…")
 	serial, pkg := g.serial, g.pkg
-	opts := LogOpts{All: all, Raw: g.logRawChk.Checked, Color: false}
+	opts := logcat.Opts{All: all, Raw: g.logRawChk.Checked, Color: false}
 	go func() {
-		ls, err := startLogStream(serial, pkg, opts)
+		ls, err := logcat.Start(serial, pkg, opts)
 		fyne.Do(func() {
 			if err != nil {
 				g.logStart.Enable()
@@ -628,7 +632,7 @@ func (g *guiState) startLog() {
 
 // restartLogIfRunning reinicia el stream para aplicar un cambio de «sin filtro»
 // o «crudo».
-func (g *guiState) restartLogIfRunning() {
+func (g *state) restartLogIfRunning() {
 	if g.streamer == nil {
 		return
 	}
@@ -636,9 +640,8 @@ func (g *guiState) restartLogIfRunning() {
 	g.startLog()
 }
 
-// attachStream engancha un LogStreamer ya arrancado al panel (se llama en el
-// hilo UI).
-func (g *guiState) attachStream(ls *LogStreamer) {
+// attachStream engancha un Streamer ya arrancado al panel (en el hilo UI).
+func (g *state) attachStream(ls *logcat.Streamer) {
 	g.streamer = ls
 	g.logStart.Disable()
 	g.logStop.Enable()
@@ -666,10 +669,10 @@ func (g *guiState) attachStream(ls *LogStreamer) {
 				mu.Unlock()
 				return
 			}
-			batch := pending
+			chunk := pending
 			pending = nil
 			mu.Unlock()
-			fyne.Do(func() { g.appendLog(batch) })
+			fyne.Do(func() { g.appendLog(chunk) })
 		}
 		for {
 			select {
@@ -685,17 +688,17 @@ func (g *guiState) attachStream(ls *LogStreamer) {
 	}()
 }
 
-func (g *guiState) appendLog(lines []string) {
+func (g *state) appendLog(lines []string) {
 	g.logAll = append(g.logAll, lines...)
-	if len(g.logAll) > guiLogCap {
-		g.logAll = g.logAll[len(g.logAll)-guiLogCap:]
+	if len(g.logAll) > logCap {
+		g.logAll = g.logAll[len(g.logAll)-logCap:]
 	}
 	g.rebuildLogView()
 }
 
 // onLogEnded se llama cuando el stream termina por sí solo (adb murió). Si fue
 // una parada manual, g.streamer ya es nil y no hace nada.
-func (g *guiState) onLogEnded(err error) {
+func (g *state) onLogEnded(err error) {
 	if g.streamer == nil {
 		return
 	}
@@ -709,7 +712,7 @@ func (g *guiState) onLogEnded(err error) {
 	}
 }
 
-func (g *guiState) stopLog() {
+func (g *state) stopLog() {
 	if g.streamer == nil {
 		return
 	}
@@ -720,13 +723,13 @@ func (g *guiState) stopLog() {
 	go s.Stop()
 }
 
-func (g *guiState) clearLog() {
+func (g *state) clearLog() {
 	g.logAll = nil
 	g.logView = nil
 	g.logList.Refresh()
 }
 
-func (g *guiState) rebuildLogView() {
+func (g *state) rebuildLogView() {
 	q := strings.ToLower(strings.TrimSpace(g.logFilter.Text))
 	g.logView = g.logView[:0]
 	for _, l := range g.logAll {

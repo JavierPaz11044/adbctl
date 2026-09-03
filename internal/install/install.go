@@ -1,20 +1,23 @@
-package main
+// Package install instala APKs locales en el dispositivo (adb install).
+package install
 
 import (
 	"fmt"
 	"os"
 	"strings"
+
+	"adbctl/internal/adb"
 )
 
-// InstallOpts son las banderas de `adb install`.
-type InstallOpts struct {
+// Opts son las banderas de `adb install`.
+type Opts struct {
 	Reinstall  bool // -r: reinstalar conservando datos
 	Downgrade  bool // -d: permitir bajar de versión
 	GrantPerms bool // -g: conceder todos los permisos en tiempo de ejecución
 }
 
-// installAPK instala un .apk local en el dispositivo.
-func installAPK(serial, path string, o InstallOpts) (string, error) {
+// APK instala un .apk local en el dispositivo y devuelve la salida de adb.
+func APK(serial, path string, o Opts) (string, error) {
 	fi, err := os.Stat(path)
 	if err != nil {
 		return "", fmt.Errorf("no se puede leer %q: %w", path, err)
@@ -38,7 +41,7 @@ func installAPK(serial, path string, o InstallOpts) (string, error) {
 	}
 	args = append(args, path)
 
-	out, err := runADB(serial, args...)
+	out, err := adb.Run(serial, args...)
 	if err != nil {
 		return "", err
 	}

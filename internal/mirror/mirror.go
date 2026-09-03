@@ -1,4 +1,5 @@
-package main
+// Package mirror integra scrcpy para compartir la pantalla del dispositivo.
+package mirror
 
 import (
 	"fmt"
@@ -6,19 +7,18 @@ import (
 	"os/exec"
 )
 
-// checkScrcpyInstalled verifica que scrcpy esté disponible en el PATH.
-func checkScrcpyInstalled() error {
+// CheckInstalled verifica que scrcpy esté disponible en el PATH.
+func CheckInstalled() error {
 	if _, err := exec.LookPath("scrcpy"); err != nil {
 		return fmt.Errorf("no se encontró 'scrcpy' en el PATH. Instálalo (ver https://github.com/Genymobile/scrcpy#installation) para poder compartir pantalla")
 	}
 	return nil
 }
 
-// mirrorScreen lanza scrcpy contra el dispositivo indicado. extraArgs se reenvían
-// tal cual a scrcpy, para poder usar cosas como --record archivo.mp4,
-// --max-size 1024, --stay-awake, etc. sin tener que reimplementarlas.
-func mirrorScreen(serial string, extraArgs []string) error {
-	if err := checkScrcpyInstalled(); err != nil {
+// Screen lanza scrcpy contra el dispositivo indicado. extraArgs se reenvían tal
+// cual a scrcpy (--record archivo.mp4, --max-size 1024, --stay-awake, …).
+func Screen(serial string, extraArgs []string) error {
+	if err := CheckInstalled(); err != nil {
 		return err
 	}
 

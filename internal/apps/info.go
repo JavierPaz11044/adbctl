@@ -1,13 +1,16 @@
-package main
+package apps
 
 import (
 	"fmt"
 	"regexp"
 	"strings"
+
+	"adbctl/internal/adb"
+	"adbctl/internal/ui"
 )
 
-// AppInfo resume los datos de un paquete instalado que devuelve `dumpsys package`.
-type AppInfo struct {
+// Info resume los datos de un paquete instalado que devuelve `dumpsys package`.
+type Info struct {
 	Package      string
 	VersionName  string
 	VersionCode  string
@@ -22,23 +25,19 @@ type AppInfo struct {
 	System       bool
 	Enabled      bool
 	APKSize      string   // tamaño legible del codePath, "" si no se pudo medir
-	Permissions  []string // permisos concedidos (runtime), sin el prefijo android.permission.
+	Permissions  []string // permisos runtime concedidos, sin el prefijo android.permission.
 }
 
 var reSystemPath = regexp.MustCompile(`^/(system|product|vendor|apex|system_ext|odm)/`)
 
-// getAppInfo consulta el dispositivo y arma un AppInfo. Los campos que no se
-// puedan extraer quedan vacíos en vez de fallar.
-func getAppInfo(serial, pkg string) (*AppInfo, error) {
-	exists, err := packageExists(serial, pkg)
-	if err != nil {
+// GetInfo consulta el dispositivo y arma un Info. Los campos que no se puedan
+// extraer quedan vacíos en vez de fallar.
+func GetInfo(serial, pkg string) (*Info, error) {
+	if err := mustExist(serial, pkg); err != nil {
 		return nil, err
 	}
-	if !exists {
-		return nil, fmt.Errorf("el paquete %q no está instalado en el dispositivo", pkg)
-	}
 
-	out, err := runADB(serial, "shell", "dumpsys", "package", pkg)
+	out, err := adb.Run(serial, "shell", "dumpsys", "package", pkg)
 	if err != nil {
 		return nil, err
 	}
@@ -50,7 +49,7 @@ func getAppInfo(serial, pkg string) (*AppInfo, error) {
 		return ""
 	}
 
-	info := &AppInfo{
+	info := &Info{
 		Package:      pkg,
 		Enabled:      true,
 		VersionName:  find(`versionName=(\S+)`),
@@ -78,7 +77,7 @@ func getAppInfo(serial, pkg string) (*AppInfo, error) {
 		info.Permissions = append(info.Permissions, m[1])
 	}
 
-	if p, err := runADB(serial, "shell", "pm", "path", pkg); err == nil {
+	if p, err := adb.Run(serial, "shell", "pm", "path", pkg); err == nil {
 		for _, l := range strings.Split(p, "\n") {
 			l = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(l), "package:"))
 			if l != "" {
@@ -90,7 +89,7 @@ func getAppInfo(serial, pkg string) (*AppInfo, error) {
 		// El codePath suele acabar en "==" (base64); se cita para que adb shell
 		// no lo malinterprete. Se ignora el código de salida: du devuelve != 0
 		// por subdirectorios sin permiso (p. ej. /oat) pero igual imprime el total.
-		d, _ := runADB(serial, "shell", "du -sh '"+info.CodePath+"' 2>/dev/null")
+		d, _ := adb.Run(serial, "shell", "du -sh '"+info.CodePath+"' 2>/dev/null")
 		for _, ln := range strings.Split(d, "\n") {
 			if f := strings.Fields(ln); len(f) > 0 {
 				info.APKSize = f[0]
@@ -102,8 +101,8 @@ func getAppInfo(serial, pkg string) (*AppInfo, error) {
 	return info, nil
 }
 
-// String formatea el AppInfo en un bloque legible para la CLI y el menú.
-func (a *AppInfo) String() string {
+// String formatea el Info en un bloque legible para la CLI y el menú.
+func (a *Info) String() string {
 	b := &strings.Builder{}
 	fmt.Fprintf(b, "%s\n", a.Package)
 	line := func(k, v string) {
@@ -114,7 +113,7 @@ func (a *AppInfo) String() string {
 	line("Versión", a.VersionName)
 	line("versionCode", a.VersionCode)
 	if a.MinSDK != "" || a.TargetSDK != "" {
-		line("SDK", fmt.Sprintf("min %s / target %s", dash(a.MinSDK), dash(a.TargetSDK)))
+		line("SDK", fmt.Sprintf("min %s / target %s", ui.Dash(a.MinSDK), ui.Dash(a.TargetSDK)))
 	}
 	line("ABI", a.ABI)
 	line("APK", strings.Join(a.APKPaths, "\n                "))
@@ -123,24 +122,10 @@ func (a *AppInfo) String() string {
 	line("Instalador", a.Installer)
 	line("Instalada", a.FirstInstall)
 	line("Actualizada", a.LastUpdate)
-	line("Tipo", pick(a.System, "app de sistema", "app de terceros"))
-	line("Estado", pick(a.Enabled, "habilitada", "DESHABILITADA"))
+	line("Tipo", ui.Pick(a.System, "app de sistema", "app de terceros"))
+	line("Estado", ui.Pick(a.Enabled, "habilitada", "DESHABILITADA"))
 	if len(a.Permissions) > 0 {
 		line("Permisos", fmt.Sprintf("%d concedidos: %s", len(a.Permissions), strings.Join(a.Permissions, ", ")))
 	}
 	return b.String()
-}
-
-func dash(s string) string {
-	if s == "" {
-		return "—"
-	}
-	return s
-}
-
-func pick(cond bool, yes, no string) string {
-	if cond {
-		return yes
-	}
-	return no
 }
