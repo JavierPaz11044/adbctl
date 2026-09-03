@@ -1,0 +1,6 @@
+# binario compilado (se genera con `go build [-tags gui] -o adbctl .`)
+/adbctl
+
+# artefactos varios
+*.out
+*.test
